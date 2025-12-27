@@ -1,5 +1,14 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+/**
+ * Context d'authentification
+ * Gère la connexion JWT avec le backend Django
+ */
 
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { authService } from '@/services';
+import { getAccessToken, clearTokens } from '@/lib/api';
+import type { User as ApiUser } from '@/types/api';
+
+// Types adaptés pour le frontend
 export type UserRole = 'admin' | 'agent' | 'tenant';
 
 export interface User {
@@ -8,6 +17,7 @@ export interface User {
   firstName: string;
   lastName: string;
   role: UserRole;
+  phone?: string;
   avatar?: string;
 }
 
@@ -17,76 +27,127 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
   isAuthenticated: boolean;
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-// Mock users for demo
-const mockUsers: Record<string, User & { password: string }> = {
-  'admin@immogest.com': {
-    id: '1',
-    email: 'admin@immogest.com',
-    firstName: 'Admin',
-    lastName: 'System',
-    role: 'admin',
-    password: 'admin123',
-  },
-  'agent@immogest.com': {
-    id: '2',
-    email: 'agent@immogest.com',
-    firstName: 'Marie',
-    lastName: 'Dupont',
-    role: 'agent',
-    password: 'agent123',
-  },
-  'locataire@immogest.com': {
-    id: '3',
-    email: 'locataire@immogest.com',
-    firstName: 'Jean',
-    lastName: 'Martin',
-    role: 'tenant',
-    password: 'tenant123',
-  },
-};
+/**
+ * Convertit un utilisateur API vers le format frontend
+ */
+const mapApiUserToUser = (apiUser: ApiUser): User => ({
+  id: String(apiUser.id),
+  email: apiUser.email,
+  firstName: apiUser.first_name,
+  lastName: apiUser.last_name,
+  role: apiUser.role,
+  phone: apiUser.phone,
+});
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
+  /**
+   * Récupère l'utilisateur depuis le localStorage ou l'API
+   */
+  const loadUser = useCallback(async () => {
+    const token = getAccessToken();
+    
+    if (!token) {
+      setUser(null);
+      setIsLoading(false);
+      return;
+    }
+
+    // Essayer de charger depuis le localStorage d'abord
     const savedUser = localStorage.getItem('user');
     if (savedUser) {
-      setUser(JSON.parse(savedUser));
+      try {
+        const parsed = JSON.parse(savedUser);
+        // Si c'est déjà au format frontend (a firstName)
+        if (parsed.firstName) {
+          setUser(parsed);
+        } else {
+          // C'est au format API, convertir
+          setUser(mapApiUserToUser(parsed));
+        }
+        setIsLoading(false);
+        return;
+      } catch {
+        // Ignorer les erreurs de parsing
+      }
     }
-    setIsLoading(false);
+
+    // Sinon, charger depuis l'API
+    try {
+      const apiUser = await authService.getProfile();
+      const mappedUser = mapApiUserToUser(apiUser);
+      setUser(mappedUser);
+      localStorage.setItem('user', JSON.stringify(mappedUser));
+    } catch {
+      // Token invalide, nettoyer
+      clearTokens();
+      setUser(null);
+    } finally {
+      setIsLoading(false);
+    }
   }, []);
 
+  useEffect(() => {
+    loadUser();
+  }, [loadUser]);
+
+  /**
+   * Connexion utilisateur
+   */
   const login = async (email: string, password: string): Promise<void> => {
     setIsLoading(true);
     
-    // Simulate API call delay
-    await new Promise(resolve => setTimeout(resolve, 800));
-    
-    const mockUser = mockUsers[email.toLowerCase()];
-    
-    if (!mockUser || mockUser.password !== password) {
+    try {
+      const response = await authService.login({ email, password });
+      const mappedUser = mapApiUserToUser(response.user);
+      setUser(mappedUser);
+      localStorage.setItem('user', JSON.stringify(mappedUser));
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { detail?: string } } };
+      throw new Error(err.response?.data?.detail || 'Email ou mot de passe incorrect');
+    } finally {
       setIsLoading(false);
-      throw new Error('Email ou mot de passe incorrect');
     }
-
-    const { password: _, ...userWithoutPassword } = mockUser;
-    setUser(userWithoutPassword);
-    localStorage.setItem('user', JSON.stringify(userWithoutPassword));
-    setIsLoading(false);
   };
 
+  /**
+   * Déconnexion
+   */
   const logout = () => {
+    authService.logout();
     setUser(null);
-    localStorage.removeItem('user');
+  };
+
+  /**
+   * Rafraîchir les données utilisateur
+   */
+  const refreshUser = async () => {
+    try {
+      const apiUser = await authService.getProfile();
+      const mappedUser = mapApiUserToUser(apiUser);
+      setUser(mappedUser);
+      localStorage.setItem('user', JSON.stringify(mappedUser));
+    } catch {
+      // Ignorer les erreurs
+    }
   };
 
   return (
-    <AuthContext.Provider value={{ user, isLoading, login, logout, isAuthenticated: !!user }}>
+    <AuthContext.Provider value={{ 
+      user, 
+      isLoading, 
+      login, 
+      logout, 
+      isAuthenticated: !!user,
+      refreshUser 
+    }}>
       {children}
     </AuthContext.Provider>
   );
